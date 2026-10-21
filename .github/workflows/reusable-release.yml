@@ -1,0 +1,201 @@
+# Reusable release workflow: compute the next semantic version (from an
+# explicit tag, a forced bump, or conventional-commit analysis), generate
+# a grouped changelog, tag the commit, and publish a GitHub Release.
+#
+# Conventional commits drive `auto` bumps:
+#   feat:                 -> minor
+#   fix:/perf:/refactor:  -> patch
+#   <type>!: or a "BREAKING CHANGE:" footer -> major
+
+name: Reusable Release
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Explicit tag to release (e.g. v1.4.0). Overrides version bumping."
+        type: string
+        required: false
+        default: ""
+      bump:
+        description: "Version bump when no tag is given: auto, major, minor, or patch."
+        type: string
+        required: false
+        default: "auto"
+      prerelease:
+        description: "Mark the GitHub Release as a pre-release."
+        type: boolean
+        required: false
+        default: false
+      generate-changelog:
+        description: "Generate a changelog grouped by conventional-commit type."
+        type: boolean
+        required: false
+        default: true
+      target:
+        description: "Commit/branch the tag is created on (defaults to the caller SHA)."
+        type: string
+        required: false
+        default: ""
+      runs-on:
+        description: "Runner label."
+        type: string
+        required: false
+        default: "ubuntu-latest"
+    outputs:
+      tag:
+        description: "The tag that was created (e.g. v1.4.0)."
+        value: ${{ jobs.release.outputs.tag }}
+      version:
+        description: "The semantic version without the leading v."
+        value: ${{ jobs.release.outputs.version }}
+
+# Creating tags and releases requires write access to contents.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out caller repository (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.target || github.sha }}
+
+      - name: Compute release version
+        id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          latest="$(git describe --tags --abbrev=0 2>/dev/null || echo '')"
+          base="${latest#v}"
+          if ! echo "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            base="0.0.0"
+            latest=""
+          fi
+          IFS='.' read -r major minor patch <<< "$base"
+
+          if [ -n "$INPUT_TAG" ]; then
+            # --- Explicit tag -------------------------------------------------
+            tag="$INPUT_TAG"
+            case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+            if ! echo "${tag#v}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+              echo "::error::Tag '$INPUT_TAG' is not a valid semantic version"
+              exit 1
+            fi
+          else
+            # --- Bump ---------------------------------------------------------
+            bump="$BUMP"
+            if [ "$bump" = "auto" ]; then
+              bump="patch"
+              range="HEAD"
+              [ -n "$latest" ] && range="${latest}..HEAD"
+              subjects="$(git log "$range" --format='%s%n%b')"
+              if echo "$subjects" | grep -Eq '^[a-z]+(\(.+\))?!:' || echo "$subjects" | grep -q 'BREAKING CHANGE:'; then
+                bump="major"
+              elif echo "$subjects" | grep -Eq '^feat(\(.+\))?:'; then
+                bump="minor"
+              fi
+            fi
+            case "$bump" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              patch) patch=$((patch + 1)) ;;
+              *) echo "::error::Unknown bump '$bump' (expected auto|major|minor|patch)"; exit 1 ;;
+            esac
+            tag="v${major}.${minor}.${patch}"
+          fi
+
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            if [ -n "$INPUT_TAG" ]; then
+              # Tag-push flow: the tag was just pushed, so it is expected
+              # to exist already — the release is created against it.
+              echo "Tag $tag already exists — creating the release for it."
+            else
+              echo "::error::Computed tag $tag already exists — bump the version or pass an explicit tag"
+              exit 1
+            fi
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "previous-tag=$latest" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag (previous: ${latest:-none})"
+
+      - name: Generate changelog
+        if: inputs.generate-changelog
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          PREV: ${{ steps.version.outputs.previous-tag }}
+        run: |
+          set -euo pipefail
+          range="HEAD"
+          [ -n "$PREV" ] && range="${PREV}..HEAD"
+          log="$(git log "$range" --format='%s' --no-merges)"
+
+          section() {
+            local title="$1" pattern="$2"
+            local entries
+            entries="$(echo "$log" | grep -E "$pattern" | sed 's/^/- /' || true)"
+            if [ -n "$entries" ]; then
+              { echo "### $title"; echo ""; echo "$entries"; echo ""; } >> release-notes.md
+            fi
+          }
+
+          {
+            echo "## $TAG"
+            echo ""
+          } > release-notes.md
+          section "🚀 Features"        '^feat(\(.+\))?!?:'
+          section "🐛 Fixes"           '^(fix|perf)(\(.+\))?!?:'
+          section "♻️ Refactoring"      '^refactor(\(.+\))?!?:'
+          section "📚 Documentation"   '^docs(\(.+\))?!?:'
+          section "🔧 Maintenance"     '^(chore|ci|build|test|style)(\(.+\))?!?:'
+
+          # Anything that did not match a known type.
+          others="$(echo "$log" | grep -vE '^(feat|fix|perf|refactor|docs|chore|ci|build|test|style)(\(.+\))?!?:' | sed 's/^/- /' || true)"
+          if [ -n "$others" ]; then
+            { echo "### Other changes"; echo ""; echo "$others"; echo ""; } >> release-notes.md
+          fi
+          cat release-notes.md
+
+      - name: Create tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TARGET: ${{ inputs.target || github.sha }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          CHANGELOG: ${{ inputs.generate-changelog }}
+        run: |
+          set -euo pipefail
+          args=("$TAG" --target "$TARGET" --title "$TAG")
+          if [ "$CHANGELOG" = "true" ]; then
+            args+=(--notes-file release-notes.md)
+          else
+            args+=(--generate-notes)
+          fi
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
+
+      - name: Job summary
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            echo "## Release published"
+            echo ""
+            echo "- Tag: \`$TAG\`"
+            echo "- Version: \`$VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"

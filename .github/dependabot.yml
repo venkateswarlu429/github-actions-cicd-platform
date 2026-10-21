@@ -1,0 +1,38 @@
+# Dependabot: keep Python deps, GitHub Actions, and the sample service's
+# Docker base image current. Grouped updates keep PR noise low.
+version: 2
+updates:
+  # GitHub Actions used by every workflow in this repo (root .github/).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      actions-all:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"
+
+  # Python dependencies of the sample consumer service.
+  - package-ecosystem: "pip"
+    directory: "/service"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      python-deps:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "deps"
+
+  # Base image of the sample service Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/service"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps"

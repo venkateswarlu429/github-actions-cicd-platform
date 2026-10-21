@@ -1,0 +1,139 @@
+# Caller workflow: manual, environment-gated deployment of the sample
+# service.
+#
+# - workflow_dispatch only: a human always starts a deploy.
+# - The target is a GitHub Environment (staging / production), so required
+#   reviewers, wait timers, and environment secrets configured on the repo
+#   gate production before any step runs.
+# - A concurrency guard serializes deploys per environment and never
+#   cancels an in-flight deploy.
+#
+# The deploy steps themselves are a documented placeholder: they resolve
+# and print the exact image (repository@digest) that would be rolled out.
+# Swap the "Deploy (placeholder)" step for your platform's rollout command
+# (kubectl/Argo CD/ECS/Helm) — an AWS OIDC variant is sketched below the
+# main jobs as commented YAML, using OIDC + repository variables instead of
+# stored AWS keys. No real account IDs appear anywhere in this file.
+
+name: Service Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: choice
+        options: [staging, production]
+        default: staging
+        required: true
+      image-tag:
+        description: "Image tag to deploy (e.g. 1.2.0 or sha-abc1234)"
+        type: string
+        default: "latest"
+        required: true
+      image-digest:
+        description: "Optional image digest (sha256:...) — wins over the tag when set"
+        type: string
+        default: ""
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    # GitHub Environments gate this job: required reviewers / wait timers
+    # set on the `production` environment must approve before it starts.
+    environment:
+      name: ${{ inputs.environment }}
+      url: https://example.internal/${{ inputs.environment }}/sample-service
+    # One deploy per environment at a time; queue, never cancel.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/sample-service
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve image reference
+        id: image
+        env:
+          TAG: ${{ inputs.image-tag }}
+          DIGEST: ${{ inputs.image-digest }}
+        run: |
+          if [ -n "$DIGEST" ]; then
+            echo "ref=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${IMAGE}:${TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy (placeholder)
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          {
+            echo "## Deployment"
+            echo ""
+            echo "- Environment: \`${TARGET_ENV}\`"
+            echo "- Image: \`${REF}\`"
+            echo "- Triggered by: \`${{ github.actor }}\`"
+            echo ""
+            echo "Placeholder step — replace with the real rollout, e.g.:"
+            echo ""
+            echo '```bash'
+            echo "# kubectl set image deployment/sample-service app=${REF}"
+            echo "# argocd app sync sample-service --prune"
+            echo "# helm upgrade --install sample-service ./chart --set image=${REF}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Would deploy ${REF} to ${TARGET_ENV}"
+
+      - name: Post-deploy smoke check (placeholder)
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          echo "Smoke-check the ${TARGET_ENV} health endpoint here, e.g.:"
+          echo "  curl -fsS https://example.internal/${TARGET_ENV}/sample-service/healthz"
+          echo "Skipping live check in the placeholder implementation."
+
+# ---------------------------------------------------------------------------
+# OPTIONAL: AWS deployment via OIDC (no long-lived AWS keys)
+#
+# Configure once on the repository:
+#   * An IAM OIDC identity provider for token.actions.githubusercontent.com
+#   * An IAM role trusting that provider, scoped to this repo/environment
+#   * Repository variable AWS_REGION, and per-environment variable
+#     AWS_DEPLOY_ROLE_ARN (names only — real ARNs live in repo settings,
+#     never in this file)
+# Then uncomment the job below, grant the caller `id-token: write`, and
+# replace the placeholder step with your ECS / EKS rollout commands.
+#
+#   deploy-aws:
+#     name: Deploy to AWS (${{ inputs.environment }})
+#     runs-on: ubuntu-latest
+#     environment: ${{ inputs.environment }}
+#     concurrency:
+#       group: deploy-aws-${{ inputs.environment }}
+#       cancel-in-progress: false
+#     permissions:
+#       contents: read
+#       id-token: write   # required for OIDC -> IAM role assumption
+#     steps:
+#       - uses: actions/checkout@v4
+#       - name: Configure AWS credentials (OIDC)
+#         uses: aws-actions/configure-aws-credentials@v4
+#         with:
+#           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+#           aws-region: ${{ vars.AWS_REGION }}
+#       - name: Roll out (example: ECS)
+#         run: |
+#           aws ecs update-service \
+#             --cluster "${{ vars.ECS_CLUSTER }}" \
+#             --service sample-service \
+#             --force-new-deployment
+# ---------------------------------------------------------------------------

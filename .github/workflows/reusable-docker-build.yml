@@ -1,0 +1,174 @@
+# Reusable container release pipeline: build with Buildx, tag/label with
+# docker/metadata-action, attach BuildKit SBOM + provenance attestations,
+# generate a standalone SPDX SBOM, and (optionally) push to GHCR and sign
+# the image with cosign keyless signing (Sigstore / OIDC — no stored keys).
+#
+# Push and signing only happen when the `push` input is true, so the same
+# workflow validates PR builds and publishes releases.
+
+name: Reusable Docker Build & Sign
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Fully qualified image name, e.g. ghcr.io/owner/app."
+        type: string
+        required: true
+      context:
+        description: "Docker build context."
+        type: string
+        required: false
+        default: "."
+      dockerfile:
+        description: "Dockerfile path, relative to the build context."
+        type: string
+        required: false
+        default: "Dockerfile"
+      platforms:
+        description: "Target platforms for Buildx."
+        type: string
+        required: false
+        default: "linux/amd64"
+      push:
+        description: "Push the image (and sign it) instead of build-only."
+        type: boolean
+        required: false
+        default: false
+      tags:
+        description: "docker/metadata-action tags configuration."
+        type: string
+        required: false
+        default: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha
+      build-args:
+        description: "Newline-separated Docker build arguments."
+        type: string
+        required: false
+        default: ""
+      sign-image:
+        description: "Sign the pushed image with cosign keyless signing."
+        type: boolean
+        required: false
+        default: true
+      runs-on:
+        description: "Runner label."
+        type: string
+        required: false
+        default: "ubuntu-latest"
+    outputs:
+      image-digest:
+        description: "Digest of the built image (sha256:...)."
+        value: ${{ jobs.build.outputs.digest }}
+      image-tags:
+        description: "Newline-separated tags produced for the image."
+        value: ${{ jobs.build.outputs.tags }}
+      image-version:
+        description: "Version label computed by docker/metadata-action."
+        value: ${{ jobs.build.outputs.version }}
+
+# Least privilege for build-only runs. When pushing, the CALLER job must
+# also grant packages: write and id-token: write (token permissions are the
+# minimum of what caller and callee request).
+permissions:
+  contents: read
+  packages: write
+  id-token: write # OIDC token for cosign keyless signing
+  attestations: write
+
+jobs:
+  build:
+    name: Build image
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: inputs.push
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.image-name }}
+          tags: ${{ inputs.tags }}
+
+      - name: Build (and optionally push) image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.context }}/${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ inputs.build-args }}
+          # BuildKit attestations, attached to the image when pushed.
+          sbom: ${{ inputs.push }}
+          provenance: ${{ inputs.push }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: ${{ inputs.context }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Install cosign
+        if: ${{ inputs.push && inputs.sign-image }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image with cosign (keyless, OIDC)
+        if: ${{ inputs.push && inputs.sign-image }}
+        env:
+          IMAGE: ${{ inputs.image-name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Job summary
+        if: always()
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PUSHED: ${{ inputs.push }}
+        run: |
+          {
+            echo "## Container build"
+            echo ""
+            echo "- Image: \`${{ inputs.image-name }}\`"
+            echo "- Pushed: \`${PUSHED}\`"
+            echo "- Digest: \`${DIGEST}\`"
+            echo "- Tags:"
+            echo '```'
+            echo "${TAGS}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

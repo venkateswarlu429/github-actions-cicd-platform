@@ -1,0 +1,68 @@
+name: "Setup Python App"
+description: >-
+  Set up Python with pip caching and install a project's runtime (and
+  optionally dev) dependencies. Shared by the reusable CI workflow and
+  usable directly from any job in this repository.
+author: "Venkateswarlu Maddula"
+
+inputs:
+  python-version:
+    description: "Python version to set up (e.g. '3.12')."
+    required: false
+    default: "3.12"
+  working-directory:
+    description: "Directory containing the requirements files."
+    required: false
+    default: "."
+  requirements-file:
+    description: "Runtime requirements file, relative to working-directory."
+    required: false
+    default: "requirements.txt"
+  dev-requirements-file:
+    description: >-
+      Dev requirements file, relative to working-directory. Installed only
+      when install-dev is true and the file exists.
+    required: false
+    default: "requirements-dev.txt"
+  install-dev:
+    description: "Install dev requirements in addition to runtime ones."
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+        # Built-in pip caching, keyed on both requirements files.
+        cache: "pip"
+        cache-dependency-path: |
+          ${{ inputs.working-directory }}/${{ inputs.requirements-file }}
+          ${{ inputs.working-directory }}/${{ inputs.dev-requirements-file }}
+
+    - name: Upgrade pip
+      shell: bash
+      run: python -m pip install --upgrade pip
+
+    - name: Install runtime dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -f "${{ inputs.requirements-file }}" ]; then
+          pip install -r "${{ inputs.requirements-file }}"
+        else
+          echo "No ${{ inputs.requirements-file }} found in $PWD — skipping."
+        fi
+
+    - name: Install dev dependencies
+      if: inputs.install-dev == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -f "${{ inputs.dev-requirements-file }}" ]; then
+          pip install -r "${{ inputs.dev-requirements-file }}"
+        else
+          echo "No ${{ inputs.dev-requirements-file }} found in $PWD — skipping."
+        fi

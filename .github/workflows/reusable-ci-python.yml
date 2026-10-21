@@ -1,0 +1,132 @@
+# Reusable CI for Python projects: matrix across Python versions, ruff lint,
+# and pytest with a coverage artifact.
+#
+# Usage (same repo):
+#   jobs:
+#     ci:
+#       uses: ./.github/workflows/reusable-ci-python.yml
+#       with:
+#         working-directory: service
+#
+# Usage (another repo, after tagging this repo v1):
+#   jobs:
+#     ci:
+#       uses: venkateswarlu429/github-actions-cicd-platform/.github/workflows/reusable-ci-python.yml@v1
+#       with:
+#         working-directory: .
+#
+# NOTE: this workflow uses the bundled composite action
+# .github/actions/setup-python-app via a relative path, which resolves
+# against the caller's checked-out repository. When calling from another
+# repository, vendor the .github/actions/setup-python-app folder into that
+# repository (it is intentionally tiny and dependency-free).
+
+name: Reusable CI - Python
+
+on:
+  workflow_call:
+    inputs:
+      python-versions:
+        description: "JSON array of Python versions to test against."
+        type: string
+        required: false
+        default: '["3.11", "3.12"]'
+      working-directory:
+        description: "Directory containing the Python project."
+        type: string
+        required: false
+        default: "."
+      requirements-file:
+        description: "Runtime requirements file (relative to working-directory)."
+        type: string
+        required: false
+        default: "requirements.txt"
+      dev-requirements-file:
+        description: "Dev requirements file (relative to working-directory)."
+        type: string
+        required: false
+        default: "requirements-dev.txt"
+      run-lint:
+        description: "Run ruff lint checks."
+        type: boolean
+        required: false
+        default: true
+      lint-paths:
+        description: "Paths passed to ruff (relative to working-directory)."
+        type: string
+        required: false
+        default: "."
+      run-coverage:
+        description: "Collect coverage and upload it as an artifact."
+        type: boolean
+        required: false
+        default: true
+      coverage-source:
+        description: "Package/path measured by coverage (relative to working-directory)."
+        type: string
+        required: false
+        default: "app"
+      pytest-args:
+        description: "Extra arguments appended to the pytest invocation."
+        type: string
+        required: false
+        default: ""
+      runs-on:
+        description: "Runner label for the test jobs."
+        type: string
+        required: false
+        default: "ubuntu-latest"
+
+# Least privilege: CI only needs to read the code.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ${{ inputs.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(inputs.python-versions) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python app
+        uses: ./.github/actions/setup-python-app
+        with:
+          python-version: ${{ matrix.python-version }}
+          working-directory: ${{ inputs.working-directory }}
+          requirements-file: ${{ inputs.requirements-file }}
+          dev-requirements-file: ${{ inputs.dev-requirements-file }}
+          install-dev: "true"
+
+      - name: Lint with ruff
+        if: inputs.run-lint
+        run: ruff check ${{ inputs.lint-paths }}
+
+      - name: Run tests (with coverage)
+        if: inputs.run-coverage
+        run: >-
+          python -m pytest
+          --cov=${{ inputs.coverage-source }}
+          --cov-report=xml:coverage.xml
+          --cov-report=term-missing
+          ${{ inputs.pytest-args }}
+
+      - name: Run tests (no coverage)
+        if: ${{ !inputs.run-coverage }}
+        run: python -m pytest ${{ inputs.pytest-args }}
+
+      - name: Upload coverage report
+        if: ${{ always() && inputs.run-coverage }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-python-${{ matrix.python-version }}
+          path: ${{ inputs.working-directory }}/coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14

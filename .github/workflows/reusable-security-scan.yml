@@ -1,0 +1,118 @@
+# Reusable security scanning: Trivy filesystem scan (SARIF -> GitHub
+# Security tab), gitleaks secret scanning, pip-audit for Python projects,
+# and dependency review on pull requests.
+#
+# The job fails when Trivy finds vulnerabilities at or above the
+# `fail-on-severity` threshold.
+
+name: Reusable Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Directory to scan (repository root by default)."
+        type: string
+        required: false
+        default: "."
+      fail-on-severity:
+        description: "Lowest severity that fails the job: LOW, MEDIUM, HIGH, or CRITICAL."
+        type: string
+        required: false
+        default: "HIGH"
+      trivy-ignore-unfixed:
+        description: "Only report vulnerabilities that have a fix available."
+        type: boolean
+        required: false
+        default: true
+      upload-sarif:
+        description: "Upload Trivy SARIF results to the GitHub Security tab."
+        type: boolean
+        required: false
+        default: true
+      run-pip-audit:
+        description: "Run pip-audit against the Python requirements file."
+        type: boolean
+        required: false
+        default: false
+      requirements-file:
+        description: "Requirements file for pip-audit (relative to working-directory)."
+        type: string
+        required: false
+        default: "requirements.txt"
+      runs-on:
+        description: "Runner label."
+        type: string
+        required: false
+        default: "ubuntu-latest"
+
+# security-events: write is required for the SARIF upload; the caller must
+# grant at least this much for the upload step to succeed.
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write # dependency review posts a PR comment summary
+
+jobs:
+  scan:
+    name: Security scan
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@v4
+        with:
+          # Full history so gitleaks can scan the commit range.
+          fetch-depth: 0
+
+      - name: Resolve severity threshold
+        id: sev
+        env:
+          THRESHOLD: ${{ inputs.fail-on-severity }}
+        run: |
+          # Expand the threshold into the full Trivy severity list at or
+          # above it, and map to dependency-review's vocabulary
+          # (which calls MEDIUM "moderate").
+          case "$(echo "$THRESHOLD" | tr '[:lower:]' '[:upper:]')" in
+            LOW)      TRIVY="LOW,MEDIUM,HIGH,CRITICAL"; DEP="low" ;;
+            MEDIUM)   TRIVY="MEDIUM,HIGH,CRITICAL";     DEP="moderate" ;;
+            HIGH)     TRIVY="HIGH,CRITICAL";            DEP="high" ;;
+            CRITICAL) TRIVY="CRITICAL";                 DEP="critical" ;;
+            *) echo "::error::Unknown fail-on-severity '$THRESHOLD'"; exit 1 ;;
+          esac
+          echo "trivy=$TRIVY" >> "$GITHUB_OUTPUT"
+          echo "dependency-review=$DEP" >> "$GITHUB_OUTPUT"
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Vulnerability scan (Trivy, filesystem)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: "fs"
+          scan-ref: ${{ inputs.working-directory }}
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: ${{ steps.sev.outputs.trivy }}
+          ignore-unfixed: ${{ inputs.trivy-ignore-unfixed }}
+          exit-code: "1"
+
+      - name: Upload Trivy SARIF to Security tab
+        if: ${{ always() && inputs.upload-sarif }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-fs
+
+      - name: Python dependency audit (pip-audit)
+        if: inputs.run-pip-audit
+        uses: pypa/gh-action-pip-audit@v1
+        with:
+          inputs: ${{ inputs.working-directory }}/${{ inputs.requirements-file }}
+
+      - name: Dependency review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: ${{ steps.sev.outputs.dependency-review }}

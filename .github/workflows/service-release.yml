@@ -1,0 +1,69 @@
+# Caller workflow for releases of the sample service.
+#
+# Trigger it by pushing a version tag (e.g. `git tag v1.2.0 && git push
+# origin v1.2.0`) or manually with workflow_dispatch (which computes the
+# next version from conventional commits via the reusable release
+# workflow).
+#
+# Pipeline:
+#   1. resolve-version — reuse the release machinery in "compute" mode is
+#      not separable, so the release job runs first and owns the tag.
+#   2. release         — reusable-release.yml creates the tag + Release.
+#   3. docker          — reusable-docker-build.yml builds, pushes, and
+#                        cosign-signs the image tagged with that version.
+
+name: Service Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump when no tag exists yet"
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+        required: false
+
+permissions:
+  contents: write # release creation
+  packages: write # GHCR push
+  id-token: write # cosign keyless signing
+  attestations: write
+
+# Never let two releases of the service run at the same time.
+concurrency:
+  group: service-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Create release
+    uses: ./.github/workflows/reusable-release.yml
+    with:
+      # On a tag push, release that exact tag; on manual runs, bump.
+      tag: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+      bump: ${{ inputs.bump || 'auto' }}
+      generate-changelog: true
+
+  docker:
+    name: Build, push & sign image
+    needs: release
+    uses: ./.github/workflows/reusable-docker-build.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      image-name: ghcr.io/${{ github.repository_owner }}/sample-service
+      context: service
+      push: true
+      sign-image: true
+      tags: |
+        type=semver,pattern={{version}},value=${{ needs.release.outputs.tag }}
+        type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.tag }}
+        type=raw,value=latest
+        type=sha

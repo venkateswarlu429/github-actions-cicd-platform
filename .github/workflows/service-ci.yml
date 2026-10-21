@@ -1,0 +1,66 @@
+# Caller workflow for the sample service: runs the reusable Python CI and
+# the reusable security scan on every pull request (and on pushes to main).
+#
+# Both reusable workflows are referenced by local path — the pattern for
+# same-repo consumption. Cross-repo callers use the tagged form:
+#   uses: venkateswarlu429/github-actions-cicd-platform/.github/workflows/reusable-ci-python.yml@v1
+
+name: Service CI
+
+on:
+  pull_request:
+    paths:
+      - "service/**"
+      - ".github/workflows/**"
+      - ".github/actions/**"
+  push:
+    branches: [main]
+    paths:
+      - "service/**"
+      - ".github/workflows/**"
+      - ".github/actions/**"
+
+# Caller-side permissions must cover everything the reusable workflows
+# request (the effective token permissions are the more restrictive of
+# caller and callee).
+permissions:
+  contents: read
+  security-events: write # SARIF upload from the security scan
+  pull-requests: write # dependency review comment
+
+jobs:
+  ci:
+    name: CI (Python)
+    uses: ./.github/workflows/reusable-ci-python.yml
+    with:
+      working-directory: service
+      python-versions: '["3.11", "3.12"]'
+      run-lint: true
+      run-coverage: true
+      coverage-source: app
+
+  security:
+    name: Security scan
+    uses: ./.github/workflows/reusable-security-scan.yml
+    with:
+      working-directory: service
+      fail-on-severity: "HIGH"
+      upload-sarif: true
+      run-pip-audit: true
+      requirements-file: requirements.txt
+
+  # PR builds must compile, but must never push or sign — the reusable
+  # docker workflow enforces that via its `push` input.
+  docker-build-check:
+    name: Docker build (no push)
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/reusable-docker-build.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      image-name: ghcr.io/${{ github.repository_owner }}/sample-service
+      context: service
+      push: false

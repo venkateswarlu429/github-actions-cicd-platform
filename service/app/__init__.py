@@ -1,0 +1,1 @@
+"""Sample consumer service package."""
