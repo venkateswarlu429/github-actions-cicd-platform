@@ -59,7 +59,7 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     steps:
       - name: Check out caller repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Full history so gitleaks can scan the commit range.
           fetch-depth: 0
@@ -83,12 +83,12 @@ jobs:
           echo "dependency-review=$DEP" >> "$GITHUB_OUTPUT"
 
       - name: Secret scan (gitleaks)
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Vulnerability scan (Trivy, filesystem)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: "fs"
           scan-ref: ${{ inputs.working-directory }}
@@ -113,6 +113,6 @@ jobs:
 
       - name: Dependency review
         if: github.event_name == 'pull_request'
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: ${{ steps.sev.outputs.dependency-review }}
