@@ -57,7 +57,7 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository_owner }}/sample-service
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve image reference
         id: image
@@ -124,7 +124,7 @@ jobs:
 #       contents: read
 #       id-token: write   # required for OIDC -> IAM role assumption
 #     steps:
-#       - uses: actions/checkout@v4
+#       - uses: actions/checkout@v7
 #       - name: Configure AWS credentials (OIDC)
 #         uses: aws-actions/configure-aws-credentials@v4
 #         with:
