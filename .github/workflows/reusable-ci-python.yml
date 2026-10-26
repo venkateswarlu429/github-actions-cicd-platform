@@ -94,7 +94,7 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
     steps:
       - name: Check out caller repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python app
         uses: ./.github/actions/setup-python-app
@@ -124,7 +124,7 @@ jobs:
 
       - name: Upload coverage report
         if: ${{ always() && inputs.run-coverage }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-python-${{ matrix.python-version }}
           path: ${{ inputs.working-directory }}/coverage.xml
